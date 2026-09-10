@@ -9,7 +9,7 @@
 # =============================================================================
 
 # -- Scratch / base directories --
-: "${SCRATCH_DIR:=/iopsstor/scratch/cscs/$USER}"
+: "${SCRATCH_DIR:=/ritom/scratch/cscs/$USER}"
 
 # -- Project root (this repo) --
 # SLURM copies the submitted script to its spool dir, so $0 is unreliable.
@@ -20,22 +20,22 @@
 : "${MEGATRON_LM_DIR:=/capstor/scratch/cscs/gfu/frameworks/Megatron-LM}"
 
 # -- Container / environment image --
-: "${IMAGE_ENV:=/iopsstor/scratch/cscs/gfu/ce-images/alps-pytorch2512.toml}"
+: "${IMAGE_ENV:=/ritom/scratch/cscs/gfu/ce-images/alps-pytorch2512.toml}"
 
 # -- Datasets --
-: "${DATASET_DIR:=/iopsstor/scratch/cscs/gfu/datasets}"
+: "${DATASET_DIR:=/ritom/scratch/cscs/gfu/datasets}"
 : "${DATASET_CACHE_DIR:=$SCRATCH_DIR/datasets/cache}"
-: "${FINEWEB_DIR:=/iopsstor/scratch/cscs/anowak/datasets/megatron/llama_tokenized/fineweb-edu-100B}"
+: "${FINEWEB_DIR:=/ritom/scratch/cscs/anowak/datasets/megatron/llama_tokenized/fineweb-edu-100B}"
 # fineweb-2-hq mmbert quality_10, SPP-annotated, tokenized with the apertus
 # preliminary_mul_200k tokenizer. Source dirs hold nested {bin,idx} shards and
 # are globbed by DATASET_NAME=fineweb2hq-mul200k in common/train.sh. Relocated
 # here 2026-07-02; the old capstor datasets_tokenized path is gone.
-: "${FW2HQ_DIR:=/iopsstor/scratch/cscs/ahuang/fwedu}"
+: "${FW2HQ_DIR:=/ritom/scratch/cscs/ahuang/fwedu}"
 # The swissai pretraining blend (dclm-edu + fineweb-2 euro/other splits).
-: "${SWISSAI_DATA_DIR:=/iopsstor/scratch/cscs/jpcoles/a06}"
+: "${SWISSAI_DATA_DIR:=/ritom/scratch/cscs/jpcoles/a06}"
 
 # -- Tokenizer --
-: "${TOKENIZER_DIR:=/iopsstor/scratch/cscs/gfu/datasets/tokenizers}"
+: "${TOKENIZER_DIR:=/ritom/scratch/cscs/gfu/datasets/tokenizers}"
 
 # -- Output / logging --
 : "${CKPT_BASE_DIR:=$SCRATCH_DIR/megatron-runs}"
@@ -47,7 +47,7 @@
 # recompiling every kernel at every launch. train.sh puts one shared cache dir
 # underneath, used by all ranks. (Inductor and cpp_extension caches are NOT here
 # — train.sh keeps those on node-local /tmp, per job.)
-: "${JIT_CACHE_BASE:=/iopsstor/scratch/cscs/gfu/.cache}"
+: "${JIT_CACHE_BASE:=/ritom/scratch/cscs/gfu/.cache}"
 
 # -- nccl-tests (raw NCCL perf binaries; bench/nccl-tests submodule, built in-tree) --
 : "${NCCL_TESTS_DIR:=$SCRIPTS_ROOT/bench/nccl-tests}"  # binaries land in $NCCL_TESTS_DIR/build after install_nccl_tests

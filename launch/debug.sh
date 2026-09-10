@@ -5,8 +5,8 @@
 #SBATCH --time=03:30:00
 #SBATCH --job-name=vscode-tunnelcd
 #SBATCH --reservation=SD-69241-apertus-1-5-0
-#SBATCH --output=/iopsstor/scratch/cscs/%u/slurmlogs/vscode-tunnle-debug.out
-#SBATCH --error=/iopsstor/scratch/cscs/%u/slurmlogs/vscode-tunnle-debug.err
+#SBATCH --output=/ritom/scratch/cscs/%u/slurmlogs/vscode-tunnle-debug.out
+#SBATCH --error=/ritom/scratch/cscs/%u/slurmlogs/vscode-tunnle-debug.err
 
 srun --environment=pytorch_env \
  --container-mounts=$HOME/vscode-cli-$(arch)/code:/code \

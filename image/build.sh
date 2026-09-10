@@ -18,7 +18,7 @@
 #   (add --reservation=<name> when a reservation is active)
 #
 # After the build, point the .toml env file at the new .sqsh, e.g.
-#   /iopsstor/scratch/cscs/gfu/ce-images/alps-pytorch2512.toml
+#   /ritom/scratch/cscs/gfu/ce-images/alps-pytorch2512.toml
 # =============================================================================
 #SBATCH --account=infra01
 #SBATCH --partition=normal
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 : "${TAG:=${1:-}}"                                              # image tag == output .sqsh basename
-: "${SQSH_DIR:=/iopsstor/scratch/cscs/gfu/ce-images}"           # where the runtime picks images up
+: "${SQSH_DIR:=/ritom/scratch/cscs/gfu/ce-images}"           # where the runtime picks images up
 # Build context (this directory). Hardcoded because SLURM copies the submitted
 # script to its spool dir, so $0 / BASH_SOURCE point at /var/spool/... under sbatch.
 : "${IMAGE_DIR:=/capstor/scratch/cscs/gfu/frameworks/myscripts/image}"

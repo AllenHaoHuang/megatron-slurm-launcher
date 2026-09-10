@@ -31,7 +31,7 @@ source "$SCRIPTS_ROOT/common/paths.sh"
 # CONTAINER; bare filenames resolve under _research/launch/, as in lib/common.sh).
 case "$CONTAINER" in
 	/*) IMAGE_ENV=$CONTAINER ;;
-	*)  IMAGE_ENV=${WORKDIR:-/iopsstor/scratch/cscs/$USER/megatron-apertus-moe}/_research/launch/$CONTAINER ;;
+	*)  IMAGE_ENV=${WORKDIR:-/ritom/scratch/cscs/$USER/megatron-apertus-moe}/_research/launch/$CONTAINER ;;
 esac
 
 : "${EP_PREFLIGHT:=true}"   # UCCL bench opt-in here: _research images need not carry UCCL
@@ -60,7 +60,7 @@ preflight_resubmit_research() {
 
 # The slice of train.sh's environment the benches read. EP is NOT set here:
 # the size file's own (EP=${EP:-4}) must keep winning.
-export SRUN_LAUNCH="srun --cpus-per-task ${SLURM_CPUS_PER_TASK:-72} --mpi=${SRUN_MPI:-pmix} --distribution=block:block ${SRUN_EXTRA_ARGS[*]-} --environment=$IMAGE_ENV --wait 60 --kill-on-bad-exit=1 -lu"
+export SRUN_LAUNCH="srun --cpus-per-task ${SLURM_CPUS_PER_TASK:-72} --mpi=${SRUN_MPI:-pmix} ${SRUN_EXTRA_ARGS[*]-} --environment=$IMAGE_ENV --wait 60 --kill-on-bad-exit=1 -lu"
 export WORLD_SIZE=${SLURM_NTASKS:-$(( ${SLURM_NNODES:-1} * 4 ))}
 # torch.distributed rendezvous for the UCCL bench (the NCCL gate bootstraps over
 # MPI and needs neither). Derived fresh, never inherited: the resubmit exports

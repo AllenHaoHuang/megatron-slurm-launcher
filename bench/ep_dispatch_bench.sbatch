@@ -20,7 +20,7 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=72
+#SBATCH --cpus-per-task=36
 #SBATCH --mem=800G
 #SBATCH --no-requeue
 #SBATCH --reservation=SD-69241-apertus-1-5-0
@@ -62,7 +62,7 @@ RESULT="$RESULT_DIR/ep-dispatch-$SLURM_JOB_ID.json"
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=25679
 export WORLD_SIZE=$SLURM_NPROCS
-export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK / ${SLURM_GPUS_PER_NODE:-4}))
+export OMP_NUM_THREADS=18
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Deliberately NOT setting CUDA_DEVICE_MAX_CONNECTIONS=1 as train.sh does: that
 # exists for Megatron's TP overlap and would only serialise streams here.
@@ -75,7 +75,6 @@ echo "backend $BACKEND  dispatch cfg $UCCL_EP_DISPATCH_CONFIG   combine cfg $UCC
 # RANKMAP mirrors train.sh so placement can be recovered from the log by grep.
 srun --cpus-per-task "$SLURM_CPUS_PER_TASK" \
 	--mpi=pmix \
-	--distribution=block:block \
 	--network=disable_rdzv_get \
 	--environment="$IMAGE_ENV" \
 	--wait 60 --kill-on-bad-exit=1 -lu \

@@ -314,9 +314,9 @@ BACKUP_CODEBASE_DIR=$EXP_DIR/Megatron-LM
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
+export OMP_NUM_THREADS=18
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export MEGATRON_STRAGGLER_DUMP=/iopsstor/scratch/cscs/gfu/straggler-log/$SLURM_JOB_ID.csv
+export MEGATRON_STRAGGLER_DUMP=/ritom/scratch/cscs/gfu/straggler-log/$SLURM_JOB_ID.csv
 
 # torch.distributed wants MASTER_ADDR / MASTER_PORT / WORLD_SIZE before srun;
 # RANK / LOCAL_RANK are set at the srun command.
@@ -695,7 +695,7 @@ PER_RANK_CMD=$(printf '%s' "$PER_RANK_CMD" | tr -s ' \t' ' ')
 # required value, so the space form is correct there.
 # (--jobid is NOT passed: srun inherits the allocation from sbatch, and a literal
 # job id would break the pasteable DRY_RUN form below.)
-SRUN_LAUNCH="srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix --distribution=block:block --network=disable_rdzv_get --environment=$IMAGE_ENV --wait 60 --kill-on-bad-exit=1 -lu"
+SRUN_LAUNCH="srun --cpus-per-task $SLURM_CPUS_PER_TASK --mpi=pmix --network=disable_rdzv_get --environment=$IMAGE_ENV --wait 60 --kill-on-bad-exit=1 -lu"
 
 if [ "$DRY_RUN" = true ]; then
 	echo
@@ -721,7 +721,6 @@ if [ "$DRY_RUN" = true ]; then
 	# so continuation lines of the body must start at column 0.
 	echo "srun --cpus-per-task $SLURM_CPUS_PER_TASK \\"
 	echo "    --mpi=pmix \\"
-	echo "    --distribution=block:block \\"
 	echo "    --network=disable_rdzv_get \\"
 	echo "    --environment=$IMAGE_ENV \\"
 	echo "    --wait 60 \\"

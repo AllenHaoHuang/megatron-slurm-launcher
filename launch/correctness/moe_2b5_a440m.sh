@@ -6,7 +6,7 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=72
+#SBATCH --cpus-per-task=36
 #SBATCH --mem=800G
 #SBATCH --no-requeue	# Prevent Slurm to requeue the job if the execution crashes (e.g. node failure) so we don't loose the logs
 
