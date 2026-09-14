@@ -54,6 +54,8 @@
 : "${NCCL_PREFLIGHT_ITERS:=20}"
 : "${RUN_NCCL_TESTS_INSTALL:=false}"   # true → force rebuild of bench/nccl-tests
 : "${NCCL_TESTS_GENCODE:=-gencode=arch=compute_90,code=sm_90}"  # GH200 = Hopper (sm_90)
+: "${GPU_MEM_PREFLIGHT:=true}"         # scan this allocation's nodes for leftover GPU memory before training
+: "${GPU_MEM_PREFLIGHT_MB:=4000}"      # per-node summed used-MiB above which a node is "dirty" (orphaned proc) and excluded
 : "${PREFLIGHT_RESUBMIT:=preflight_resubmit_submit_sh}"  # function that hands the job back when the gate flags
 
 prelaunch_ep_bench() {
@@ -79,6 +81,15 @@ prelaunch_ep_bench() {
 	local ep="${EP_PREFLIGHT_EP:-${EP:-}}"
 	if [ -z "$ep" ] || [ $((${WORLD_SIZE:-0} % ep)) -ne 0 ]; then
 		echo "[prelaunch] WORLD_SIZE=${WORLD_SIZE:-unset} not a multiple of ep=${ep:-unset} -- skipping" >&2
+		return 0
+	fi
+
+	# An EP group that fits inside one node is intranode: DeepEP builds no RDMA
+	# layout (get_dispatch_layout returns num_tokens_per_rdma_rank=None), so the
+	# bench would measure no NIC traffic -- nothing to preflight (e.g. ep=4 on GH200).
+	local rpn="${SLURM_NTASKS_PER_NODE:-4}"
+	if [ "$ep" -le "$rpn" ]; then
+		echo "[prelaunch] ep=$ep <= ranks/node=$rpn (intranode EP group): no RDMA path to test -- skipping" >&2
 		return 0
 	fi
 
@@ -238,8 +249,19 @@ preflight_resubmit_submit_sh() {
 		EXTRA_SBATCH_ARGS="--dependency=singleton ${EXTRA_SBATCH_ARGS:-}" \
 			bash "$submit" "$0"
 	else
+		# Bare-sbatch fallback: submit.sh is what normally carries --output/--error,
+		# so a naked `sbatch "$0"` silently reverts to SLURM's default
+		# slurm-%j.out in the launch cwd (repo root) -- which is exactly how job
+		# 3373946's log ended up outside _research/logs. Mirror submit.sh's dated
+		# log dir ($SLURM_LOG_DIR/$DATE) so a resubmit through this path still lands
+		# where the primary path would. paths.sh is idempotent (guarded := defaults),
+		# safe to (re)source here just to resolve SLURM_LOG_DIR.
 		echo "[prelaunch] no $submit -- falling back to bare sbatch (no reservation!)" >&2
-		sbatch --dependency=singleton --exclude="$(paste -sd, - "$dyn")" "$0"
+		[ -r "$SCRIPTS_ROOT/common/paths.sh" ] && source "$SCRIPTS_ROOT/common/paths.sh"
+		local logdir="${SLURM_LOG_DIR:-$SCRATCH_DIR/slurmlogs}/$(date +%Y-%m-%d)"
+		mkdir -p "$logdir"
+		sbatch --dependency=singleton --exclude="$(paste -sd, - "$dyn")" \
+			--output="$logdir/%x-%j.out" --error="$logdir/%x-%j.err" "$0"
 	fi
 }
 
@@ -318,4 +340,53 @@ preflight_auto_exclude() {
 	     "$(wc -l < "$dyn") nodes), skipping training on this allocation"
 	"$PREFLIGHT_RESUBMIT"
 	exit 0   # ends the batch script: no training, and train.sh's own requeue is skipped
+}
+
+# GPU-memory gate: catch nodes whose GPUs still hold memory from a PRIOR crashed
+# job (orphaned CUDA processes Slurm never reaped). Such a node OOMs training even
+# when this job fits, so exclude it and bounce to a clean allocation. Runs BEFORE
+# training on this allocation -- the GPUs are idle here, so any sizeable used
+# memory is leftover. Dirty nodes are appended to the END of dynamic_exclude.txt
+# in the order found (no sort), so the curated list order stays intact.
+prelaunch_gpu_mem_check() {
+	[ "$GPU_MEM_PREFLIGHT" = true ] || return 0
+
+	local dyn="$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt"
+	local nnodes="${SLURM_NNODES:-${SLURM_JOB_NUM_NODES:-1}}"
+
+	# One task per node -> "<node> <summed-used-MiB>". --overlap shares the held
+	# allocation; nvidia-smi runs on the bare node and allocates nothing itself.
+	local report
+	report=$(srun --overlap --nodes="$nnodes" --ntasks="$nnodes" --ntasks-per-node=1 \
+		bash -c 'u=0; for m in $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null); do u=$((u+m)); done; echo "$(hostname) $u"' 2>/dev/null) \
+		|| { echo "[prelaunch] gpu-mem check: srun failed -- skipping (training anyway)" >&2; return 0; }
+
+	local dirty
+	dirty=$(printf '%s\n' "$report" | awk -v t="$GPU_MEM_PREFLIGHT_MB" 'NF>=2 && $2+0 > t {print $1}')
+	if [ -z "$dirty" ]; then
+		echo "[prelaunch] gpu-mem check: all $nnodes node(s) clean (<= ${GPU_MEM_PREFLIGHT_MB} MiB used)"
+		return 0
+	fi
+
+	# Append each dirty node not already listed, to the END (order preserved, no sort).
+	local appended=0 nid
+	while IFS= read -r nid; do
+		[ -n "$nid" ] || continue
+		{ [ -r "$dyn" ] && grep -qxF "$nid" "$dyn"; } && continue
+		echo "$nid" >> "$dyn"
+		appended=$((appended + 1))
+	done <<< "$dirty"
+
+	echo "[prelaunch] $(date '+%F %T') gpu-mem check: dirty nodes (> ${GPU_MEM_PREFLIGHT_MB} MiB), appended $appended to $dyn:"
+	printf '%s\n' "$report" | awk -v t="$GPU_MEM_PREFLIGHT_MB" 'NF>=2 && $2+0 > t {print "  "$1"  "$2" MiB"}'
+
+	if [ "$appended" -eq 0 ]; then
+		echo "[prelaunch] gpu-mem check: dirty nodes already excluded -- training anyway to avoid a bounce loop" >&2
+		return 0
+	fi
+
+	echo "[prelaunch] resubmitting via $PREFLIGHT_RESUBMIT ($dyn now holds" \
+	     "$(wc -l < "$dyn") nodes), skipping training on this allocation"
+	"$PREFLIGHT_RESUBMIT"
+	exit 0   # ends the batch script: no training on a fouled allocation
 }

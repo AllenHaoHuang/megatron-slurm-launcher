@@ -78,5 +78,9 @@ if [ "${EP:-1}" -gt 1 ]; then : "${NCCL_PREFLIGHT_EP:=$EP}"; else : "${NCCL_PREF
 
 PREFLIGHT_RESUBMIT=preflight_resubmit_research
 echo "[gate] $SIZE/$RECIPE on ${SLURM_NNODES:-?} nodes: a2a gate at ep=$NCCL_PREFLIGHT_EP before training"
+# GPU-memory gate first: a node with leftover memory OOMs training regardless of
+# a2a health, so bounce it before spending the bench (appends dirty nodes to the
+# end of dynamic_exclude.txt and resubmits). GPU_MEM_PREFLIGHT=false to skip.
+prelaunch_gpu_mem_check
 prelaunch_nccl_a2a
 prelaunch_ep_bench

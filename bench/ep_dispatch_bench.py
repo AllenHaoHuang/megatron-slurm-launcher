@@ -195,7 +195,12 @@ def setup_uccl(args, group, x, topk_idx, topk_weights) -> dict:
         combine_setup=combine_setup,
         # A token bound for a remote node crosses the NIC once (DeepEP sends to
         # the node, then forwards over NVLink), so tokens x payload = wire volume.
-        per_node_tokens=num_tokens_per_rdma_rank.tolist(),
+        # get_dispatch_layout returns None for the RDMA layout when the EP group is
+        # intranode (single RDMA node): no NIC crossings -> zero cross-node volume.
+        per_node_tokens=(
+            num_tokens_per_rdma_rank.tolist()
+            if num_tokens_per_rdma_rank is not None else [0]
+        ),
         desc=[f"dispatch cfg {cfg_str(Buffer.get_dispatch_config(args.ep))}   "
               f"combine cfg {cfg_str(Buffer.get_combine_config(args.ep))}",
               f"buffers: nvl {buffer.num_nvl_bytes / 1e9:.2f} GB  "
