@@ -54,8 +54,11 @@
 : "${NCCL_PREFLIGHT_ITERS:=20}"
 : "${RUN_NCCL_TESTS_INSTALL:=false}"   # true → force rebuild of bench/nccl-tests
 : "${NCCL_TESTS_GENCODE:=-gencode=arch=compute_90,code=sm_90}"  # GH200 = Hopper (sm_90)
-: "${GPU_MEM_PREFLIGHT:=true}"         # scan this allocation's nodes for leftover GPU memory before training
-: "${GPU_MEM_PREFLIGHT_MB:=4000}"      # per-node summed used-MiB above which a node is "dirty" (orphaned proc) and excluded
+: "${GPU_MEM_PREFLIGHT:=true}"         # scan this allocation's nodes for leftover GPU memory / hung nodes before training
+: "${GPU_MEM_PREFLIGHT_MB:=1000}"      # per-node summed used-MiB above which a node is "dirty" (orphaned proc) and excluded
+: "${GPU_MEM_PREFLIGHT_WAIT:=45}"      # srun --wait secs: kill laggard probe tasks this long after the first finishes (so one wedged node can't hang the gate)
+: "${GPU_MEM_PREFLIGHT_HARD:=120}"     # hard host-side cap (secs) on the whole probe -- guarantees the gate test is never longer than this (~2 min)
+export GPU_MEM_PROBE_TIMEOUT="${GPU_MEM_PROBE_TIMEOUT:-30}"  # per-node timeout(1) around nvidia-smi; exported so srun propagates it into the probe task
 : "${PREFLIGHT_RESUBMIT:=preflight_resubmit_submit_sh}"  # function that hands the job back when the gate flags
 
 prelaunch_ep_bench() {
@@ -342,51 +345,74 @@ preflight_auto_exclude() {
 	exit 0   # ends the batch script: no training, and train.sh's own requeue is skipped
 }
 
-# GPU-memory gate: catch nodes whose GPUs still hold memory from a PRIOR crashed
-# job (orphaned CUDA processes Slurm never reaped). Such a node OOMs training even
-# when this job fits, so exclude it and bounce to a clean allocation. Runs BEFORE
-# training on this allocation -- the GPUs are idle here, so any sizeable used
-# memory is leftover. Dirty nodes are appended to the END of dynamic_exclude.txt
-# in the order found (no sort), so the curated list order stays intact.
+# GPU-memory / liveness gate: catch (a) nodes whose GPUs still hold memory from a
+# PRIOR crashed job (orphaned CUDA processes Slurm never reaped) and (b) nodes that
+# are wedged/unresponsive (nvidia-smi times out, or the probe task never returns).
+# Either OOMs or hangs training, so exclude it and bounce to a clean allocation.
+# Runs BEFORE training -- the GPUs are idle here, so any sizeable used memory is
+# leftover. Bad nodes are appended to the END of dynamic_exclude.txt in the order
+# found (no sort), so the curated list order stays intact. Bounded by timeout(1)
+# per node + srun --wait so a single wedged node can't hang the gate itself.
 prelaunch_gpu_mem_check() {
 	[ "$GPU_MEM_PREFLIGHT" = true ] || return 0
 
 	local dyn="$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt"
 	local nnodes="${SLURM_NNODES:-${SLURM_JOB_NUM_NODES:-1}}"
 
-	# One task per node -> "<node> <summed-used-MiB>". --overlap shares the held
-	# allocation; nvidia-smi runs on the bare node and allocates nothing itself.
+	# Probe every node: print "<node> <summed-used-MiB>", or "<node> HUNG" if
+	# nvidia-smi errors/times out. Two safeguards so ONE wedged node can't hang the
+	# gate (the failure this replaced): timeout(1) bounds each node's nvidia-smi,
+	# and srun --wait kills laggard tasks GPU_MEM_PREFLIGHT_WAIT after the first
+	# finishes. --kill-on-bad-exit=0 lets healthy tasks still report when one fails.
+	# We do NOT bail on a non-zero srun (a killed laggard is expected) -- we analyse
+	# whatever came back and treat any node that didn't answer as hung.
+	# Host-side timeout is the outer backstop: if srun itself wedges in step LAUNCH
+	# (a node too sick to even start the task), --wait never triggers, so cap the
+	# whole probe. On kill, whatever stdout arrived is kept and non-responders fall
+	# through to the hung path below.
 	local report
-	report=$(srun --overlap --nodes="$nnodes" --ntasks="$nnodes" --ntasks-per-node=1 \
-		bash -c 'u=0; for m in $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null); do u=$((u+m)); done; echo "$(hostname) $u"' 2>/dev/null) \
-		|| { echo "[prelaunch] gpu-mem check: srun failed -- skipping (training anyway)" >&2; return 0; }
+	report=$(timeout "${GPU_MEM_PREFLIGHT_HARD}" \
+		srun --overlap --nodes="$nnodes" --ntasks="$nnodes" --ntasks-per-node=1 \
+		--wait="${GPU_MEM_PREFLIGHT_WAIT}" --kill-on-bad-exit=0 \
+		bash -c 'to=${GPU_MEM_PROBE_TIMEOUT:-30}; o=$(timeout "$to" nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null); if [ $? -ne 0 ]; then echo "$(hostname) HUNG"; else u=0; for m in $o; do u=$((u+m)); done; echo "$(hostname) $u"; fi' \
+		2>/dev/null)
 
-	local dirty
-	dirty=$(printf '%s\n' "$report" | awk -v t="$GPU_MEM_PREFLIGHT_MB" 'NF>=2 && $2+0 > t {print $1}')
-	if [ -z "$dirty" ]; then
-		echo "[prelaunch] gpu-mem check: all $nnodes node(s) clean (<= ${GPU_MEM_PREFLIGHT_MB} MiB used)"
+	# Nodes that answered anything, vs the full allocation. Missing = never reported
+	# (task killed by --wait, or node unreachable) -> hung.
+	local answered nodelist hung_missing hung_explicit dirty bad
+	answered=$(printf '%s\n' "$report" | awk 'NF>=2{print $1}' | sort -u)
+	nodelist=$(scontrol show hostnames "${SLURM_JOB_NODELIST:-${SLURM_NODELIST:-}}" 2>/dev/null | sort -u)
+	hung_explicit=$(printf '%s\n' "$report" | awk '$2=="HUNG"{print $1}')
+	[ -n "$nodelist" ] && hung_missing=$(comm -23 <(printf '%s\n' "$nodelist") <(printf '%s\n' "$answered"))
+	dirty=$(printf '%s\n' "$report" | awk -v t="$GPU_MEM_PREFLIGHT_MB" '$2 ~ /^[0-9]+$/ && $2+0 > t {print $1}')
+
+	bad=$(printf '%s\n%s\n%s\n' "$hung_explicit" "$hung_missing" "$dirty" | sed '/^[[:space:]]*$/d' | sort -u)
+	if [ -z "$bad" ]; then
+		echo "[prelaunch] gpu-mem check: all $nnodes node(s) responsive and clean (<= ${GPU_MEM_PREFLIGHT_MB} MiB used)"
 		return 0
 	fi
 
-	# Append each dirty node not already listed, to the END (order preserved, no sort).
+	# Append each bad node not already listed, to the END (order preserved, no sort).
 	local appended=0 nid
 	while IFS= read -r nid; do
 		[ -n "$nid" ] || continue
 		{ [ -r "$dyn" ] && grep -qxF "$nid" "$dyn"; } && continue
 		echo "$nid" >> "$dyn"
 		appended=$((appended + 1))
-	done <<< "$dirty"
+	done <<< "$bad"
 
-	echo "[prelaunch] $(date '+%F %T') gpu-mem check: dirty nodes (> ${GPU_MEM_PREFLIGHT_MB} MiB), appended $appended to $dyn:"
-	printf '%s\n' "$report" | awk -v t="$GPU_MEM_PREFLIGHT_MB" 'NF>=2 && $2+0 > t {print "  "$1"  "$2" MiB"}'
+	echo "[prelaunch] $(date '+%F %T') gpu-mem check: bad nodes, appended $appended to $dyn:"
+	[ -n "$hung_explicit" ] && printf '%s\n' "$hung_explicit" | sed 's/^/  HUNG (nvidia-smi failed) /'
+	[ -n "$hung_missing" ]  && printf '%s\n' "$hung_missing"  | sed 's/^/  HUNG (no response) /'
+	[ -n "$dirty" ] && printf '%s\n' "$report" | awk -v t="$GPU_MEM_PREFLIGHT_MB" '$2 ~ /^[0-9]+$/ && $2+0 > t {print "  DIRTY "$1"  "$2" MiB"}'
 
 	if [ "$appended" -eq 0 ]; then
-		echo "[prelaunch] gpu-mem check: dirty nodes already excluded -- training anyway to avoid a bounce loop" >&2
+		echo "[prelaunch] gpu-mem check: bad nodes already excluded -- training anyway to avoid a bounce loop" >&2
 		return 0
 	fi
 
 	echo "[prelaunch] resubmitting via $PREFLIGHT_RESUBMIT ($dyn now holds" \
 	     "$(wc -l < "$dyn") nodes), skipping training on this allocation"
 	"$PREFLIGHT_RESUBMIT"
-	exit 0   # ends the batch script: no training on a fouled allocation
+	exit 0   # ends the batch script: no training on a fouled/hung allocation
 }
