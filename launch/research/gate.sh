@@ -47,6 +47,10 @@ source "$SCRIPTS_ROOT/common/prelaunch.sh"
 preflight_resubmit_research() {
 	local tl
 	tl=$(scontrol show job "${SLURM_JOB_ID:-}" 2>/dev/null | sed -n 's/.*TimeLimit=\([^ ]*\).*/\1/p' | head -1)
+	# Fresh random MASTER_PORT so a gate bounce never reuses this (possibly wedged)
+	# allocation's rendezvous port -- a lingering TCPStore on the same port hangs the
+	# replacement. Placed after ALL in --export so it overrides the inherited value.
+	local rq_port=$(( 20000 + RANDOM % 20000 ))
 	sbatch \
 		--dependency=singleton \
 		--nodes="${SLURM_NNODES:-1}" \
@@ -54,7 +58,7 @@ preflight_resubmit_research() {
 		--job-name="${SLURM_JOB_NAME:-$SIZE-$RECIPE}" \
 		${CLUSTER_SBATCH_FLAGS[@]+"${CLUSTER_SBATCH_FLAGS[@]}"} \
 		${RESERVATION:+--reservation="$RESERVATION"} \
-		--export=ALL,SIZE="$SIZE",RECIPE="$RECIPE",CLUSTER="${CLUSTER:-alps3}",FRAMEWORK_DIR="$FRAMEWORK_DIR" \
+		--export=ALL,SIZE="$SIZE",RECIPE="$RECIPE",CLUSTER="${CLUSTER:-alps3}",FRAMEWORK_DIR="$FRAMEWORK_DIR",MASTER_PORT=$rq_port \
 		"$FRAMEWORK_DIR/train.sbatch"
 }
 

@@ -245,6 +245,11 @@ preflight_listed_nodes() {
 preflight_resubmit_submit_sh() {
 	local submit="$SCRIPTS_ROOT/submit.sh"
 	local dyn="$SCRIPTS_ROOT/common/filter/dynamic_exclude.txt"
+	# Fresh random MASTER_PORT so a gate bounce never reuses this allocation's
+	# rendezvous port (a lingering TCPStore on it hangs the replacement). Exported
+	# here so both the submit.sh re-exec and the bare-sbatch fallback inherit it;
+	# this shell exits right after resubmitting, so mutating the env is harmless.
+	export MASTER_PORT=$(( 20000 + RANDOM % 20000 ))
 	if [ -r "$submit" ]; then
 		# no EXCLUDE_FILE override: submit.sh already defaults to the dynamic
 		# list, which now holds the union. EXTRA_SBATCH_ARGS (e.g. --nodes) is
