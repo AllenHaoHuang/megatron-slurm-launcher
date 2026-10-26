@@ -1,3 +1,5 @@
+# Experimental comparison image: upstream DeepGEMM PR432 + PR375 pre-drain.
+# Build and test on GH200 before replacing the training image.
 # FROM jfrog.svc.cscs.ch/docker-group-csstaff/alps-images/apertus-2:alps5-dev
 # FROM jfrog.svc.cscs.ch/docker-group-csstaff/alps-images/ngc-nemo:25.11.01-alps4-dev
 #FROM jfrog.svc.cscs.ch/docker-group-csstaff/alps-images/ngc-pytorch:25.12-py3-alps3
@@ -12,9 +14,9 @@ FROM jfrog.svc.cscs.ch/docker-group-csstaff/alps-images/ngc-pytorch:25.12-py3-al
 ARG UCCL_REPO=https://github.com/swiss-ai/uccl.git
 ARG UCCL_BRANCH=slingshot-dev-clean
 ARG UCCL_REF=fa4c325c
-ARG UCCL_NVL_PEERS=4     # NVLink peers per node (GH200: 4 GPUs/node)
-ARG UCCL_CUDA_ARCH=9.0   # GH200 = Hopper (sm_90)
-ARG UCCL_MAX_JOBS=32     # ninja parallelism; the default is one job per core (288 here)
+ARG UCCL_NVL_PEERS=4
+ARG UCCL_CUDA_ARCH=9.0
+ARG UCCL_MAX_JOBS=32
 # NB: the last three are deliberately NOT named NUM_MAX_NVL_PEERS /
 # TORCH_CUDA_ARCH_LIST / MAX_JOBS. An ENV in the base image beats an ARG of the
 # same name, and this image ships TORCH_CUDA_ARCH_LIST="8.0 8.6 9.0 10.0 11.0
@@ -37,6 +39,78 @@ ARG CAUSAL_CONV1D_REF=v1.7.0
 # because pip otherwise sees the system-site copy as already satisfied
 # (ensurepip is not an option: Debian disables it on the alps6 base's python).
 RUN python3 -m pip install --force-reinstall pip
+
+# FlashAttention-3 for GH200 (Hopper/SM90), alongside the base image's FA2.
+# Pin newer upstream hopper source with native CUDA 13 toolchain handling.
+# Force an aarch64 source build against the existing PyTorch, without replacing it.
+# CUDA 13 puts CCCL under include/cccl; FA3's bundled nvcc needs it explicitly.
+# This revision uses system nvcc on CUDA 13 and sets the CCCL include paths.
+ARG FA3_REF=28ef22c99a135b234fb54bc33cfb638078bacb65
+ARG FA3_MAX_JOBS=4
+# Workaround to try for CUDA 13 ptxas C7907 on FA3 BF16 forward kernels.
+# Lower optimization may affect throughput; verify on GPU and benchmark.
+# Set --build-arg FA3_PTXAS_OPT=3 to restore the normal optimization level.
+ARG FA3_PTXAS_OPT=1
+RUN set -eux; \
+    ulimit -n "$(ulimit -Hn)" || true; \
+    python3 -m pip install ninja packaging wheel einops; \
+    git clone https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention; \
+    git -C /tmp/flash-attention checkout "$FA3_REF"; \
+    git -C /tmp/flash-attention rev-parse HEAD > /opt/fa3-source-commit.txt; \
+    git -C /tmp/flash-attention submodule update --init csrc/cutlass; \
+    cd /tmp/flash-attention/hopper; \
+    test -f /usr/local/cuda/include/cccl/cuda/std/utility; \
+    /usr/local/cuda/bin/nvcc --version; \
+    FLASH_ATTENTION_FORCE_BUILD=TRUE \
+    FLASH_ATTENTION_DISABLE_SM80=TRUE \
+    CPATH=/usr/local/cuda/include/cccl${CPATH:+:$CPATH} \
+    PYTORCH_NVCC=/usr/local/cuda/bin/nvcc \
+    NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:+$NVCC_APPEND_FLAGS }-Xptxas=-O${FA3_PTXAS_OPT}" \
+    MAX_JOBS=$FA3_MAX_JOBS NVCC_THREADS=2 CUDA_HOME=/usr/local/cuda \
+        python3 -m pip install --no-build-isolation --no-deps --force-reinstall .
+
+# Use one module instance for both upstream and Transformer Engine import paths.
+# Validate outside the source checkout, whose egg-info can shadow installed metadata.
+# Separate from compilation so a validation failure does not discard its layer.
+RUN set -eux; \
+    SITE="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    mkdir -p "$SITE/flash_attn_3"; \
+    touch "$SITE/flash_attn_3/__init__.py"; \
+    printf '%s\n' 'import sys' 'import flash_attn_interface as _impl' 'sys.modules[__name__] = _impl' > "$SITE/flash_attn_3/flash_attn_interface.py"; \
+    printf '%s\n' 'import sys' 'import flash_attn_config as _impl' 'sys.modules[__name__] = _impl' > "$SITE/flash_attn_3/flash_attn_config.py"; \
+    cd /; \
+    python3 -c 'import torch, sysconfig; from pathlib import Path; from importlib.metadata import distribution; import flash_attn_interface as upstream; from flash_attn_3 import flash_attn_interface as fa3; import flash_attn_3._C as kernels; site = Path(sysconfig.get_paths()["purelib"]).resolve(); dist = Path(distribution("flash-attn-3").locate_file("")).resolve(); print("FA3 paths:", site, fa3.__file__, kernels.__file__, dist, flush=True); assert Path(fa3.__file__).resolve().is_relative_to(site), ("interface outside site", fa3.__file__, site); assert Path(kernels.__file__).resolve().is_relative_to(site), ("extension outside site", kernels.__file__, site); assert dist.is_relative_to(site), ("metadata outside site", dist, site); assert fa3 is upstream, "FA3 interface loaded twice"; assert callable(fa3.flash_attn_func) and callable(fa3.flash_attn_varlen_func), "missing FA3 entry points"; print("FA3 import OK")'; \
+    rm -rf /tmp/flash-attention
+
+# DeepGEMM 2.8.0: upstream Public Release 26/09 (PR432), pinned for comparison.
+# GH200/SM90: drain pending TMA reads BEFORE replacing expert descriptors.
+# Port PR375 pre-drain to this pinned source; verify the installed header.
+COPY patch_deepgemm_pr375.py /opt/patch_deepgemm_pr375.py
+ARG DEEPGEMM_REPO=https://github.com/deepseek-ai/DeepGEMM.git
+ARG DEEPGEMM_REF=ab69f76be5bb9ea3499bc755002b1a876cb0b3d9
+ARG DEEPGEMM_MAX_JOBS=4
+ARG DEEPGEMM_PR375_COMMIT=4e4e54036becc2a1ee9b5470015566673045acfd
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libdw-dev libelf-dev \
+    && test -r /usr/include/elfutils/libdwfl.h \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    python3 -m pip uninstall -y deep_gemm; \
+    git clone "$DEEPGEMM_REPO" /opt/deepgemm; \
+    cd /opt/deepgemm; \
+    git checkout "$DEEPGEMM_REF"; \
+    git rev-parse HEAD > /opt/deepgemm-pr375.txt; \
+    python3 /opt/patch_deepgemm_pr375.py; \
+    printf 'PR375=%s\n' "$DEEPGEMM_PR375_COMMIT" >> /opt/deepgemm-pr375.txt; \
+    git submodule update --init --recursive; \
+    DG_FORCE_BUILD=1 DG_USE_LOCAL_VERSION=1 \
+    MAX_JOBS=$DEEPGEMM_MAX_JOBS CUDA_HOME=/usr/local/cuda \
+    CPATH=/usr/local/cuda/include/cccl${CPATH:+:$CPATH} \
+        python3 -m pip install --no-build-isolation --no-deps --force-reinstall .; \
+    cd /; \
+    python3 -c 'from pathlib import Path; import sysconfig; from importlib.metadata import distribution; d = distribution("deep_gemm"); assert d.version.split("+")[0] == "2.8.0", ("Unexpected DeepGEMM version", d.version); site = Path(sysconfig.get_paths()["purelib"]).resolve(); h = Path(d.locate_file("deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh")).resolve(); assert h.is_relative_to(site), ("Installed header outside site", h, site); s = h.read_text(); assert s == Path("/opt/deepgemm/deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh").read_text(), "Installed DeepGEMM header differs from patched source"; b = s.split("last_group_idx = scheduler.current_group_idx;", 1)[1].split("ptx::tensor_map_acquire_gpu", 1)[0]; r = b.index("ptx::tensor_map_replace_global_addr_in_smem"); assert b.index("cute::tma_desc_commit_group();") < b.index("cute::tma_desc_wait_group();") < b.index("__syncwarp(") < r, "PR375 pre-drain missing"; assert "cute::tma_desc_wait_group();" in b[r:], "Post-update wait missing"; print("DeepGEMM PR375 installed:", d.version, h)'; \
+    cat /opt/deepgemm-pr375.txt
 
 RUN pip uninstall -y deep_ep uccl
 RUN pip install nanobind
@@ -86,12 +160,6 @@ ENV UCCL_EP_TRANSPORT=cxi
 RUN pip uninstall -y transformer_engine
 RUN pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@$TE_REF
 
-# deepgemm for fp8
-RUN pip uninstall -y deep_gemm
-# COPY ./deep_gemm-2.6.1+local-cp312-cp312-linux_aarch64.whl /tmp/
-# RUN pip install /tmp/deep_gemm-2.6.1+local-cp312-cp312-linux_aarch64.whl
-RUN pip install --no-build-isolation git+https://github.com/FFGGSSJJ/DeepGEMM.git@main
-
 # grouped_gemm
 RUN pip uninstall -y grouped_gemm
 # COPY ./nv_grouped_gemm-1.1.4.post8-cp312-cp312-linux_aarch64.whl /tmp/
@@ -127,6 +195,7 @@ RUN python3 -m pip uninstall -y causal_conv1d \
 
 # wandb
 RUN python3 -m pip install --upgrade wandb
+
 
 # Tier check: fail the build if any pinned package resolves from outside the
 # interpreter's own site (sysconfig purelib — the venv on nemo-style bases,
